@@ -2,7 +2,7 @@
 # TI-monitor
 
 A lightweight web dashboard for monitoring the Telematics Infrastructure (TI) and internet quality in real time.
-`TI-monitor` displays the current status of TI services using the official [Gematik Lagebild](https://fachportal.gematik.de/ti-status) API and measures internet performance (ping & jitter).  
+`TI-monitor` displays the current status of TI services using the official [Gematik Lagebild](https://fachportal.gematik.de/ti-status) API and measures [internet performance](https://speed.cloudflare.com/) (ping & jitter).  
 It includes automatic refresh and WebPush notifications for TI service outages.
 
 **Live Demo:** [yourproject.pages.dev](https://yourprojectare)
