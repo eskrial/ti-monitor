@@ -1,0 +1,206 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>TI‑monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+     
+      @media (prefers-color-scheme: light){
+        --ok: rgb(52,199,89);
+        --warn: rgb(255,204,0);
+        --bad: rgb(255,59,48);
+      }
+      @media (prefers-color-scheme: dark){
+        --ok: rgb(48,209,88);
+        --warn: rgb(255,214,10);
+        --bad: rgb(255,69,58);
+      }
+    }
+
+    body { font-family: SF Pro,-apple-system,BlinkMacSystemFont,Inter,Fira Sans,Helvetica Neue,Arial Nova,Roboto,Helvetica,"system-ui",sans-serif;  padding: 2rem }
+    h2 { margin-bottom: 0.6em; }
+    .container { display: flex; flex-wrap: wrap; gap: 1em; }
+
+    .app-box {
+      border: 1px solid #ddd;
+      border-radius: 1rem;
+      padding: 1em;
+      text-align: center;
+      box-shadow: 0 2px 6px rgba(0,0,0,.08);
+    }
+    .app-box h4 { margin: 0.5em 0 0.6em; font-size: 1.05em; }
+    .icon { width: 54px; height: 54px; margin: 0 auto; display: grid; place-items: center; }
+    .icon svg { width: 100%; height: 100%; }
+
+    .status {
+      display: inline-block; padding: 0.35em 0.7em;
+      border-radius: 6px; color: #fff; font-weight: bold;
+    }
+    .status-none   { background: var(--ok); }
+    .status-partial{ background: var(--warn); }
+    .status-total  { background: var(--bad); }
+
+    .sub { margin-top: 0.7em; font-size: 0.9em; color: #444; text-align: left; }
+    .kv { display: flex; justify-content: space-between; margin: 0.18em 0; }
+    .kv b { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container" id="apps"></div>
+
+  <script type="module">
+    import { createIcons, icons } from 'https://unpkg.com/lucide@latest/dist/esm/lucide.js';
+    // --- Constants ---
+    const API_TI = 'https://ti-lage.prod.ccs.gematik.solutions/lageapi/v2/tilage';
+    const REFRESH_MS = 60_000;
+
+    // --- App definitions for tiles ---
+    const apps = [
+      { key: 'epa',         name: 'ePA',          icon: 'file-text' },
+      { key: 'erezept',     name: 'E‑Rezept',     icon: 'pill' },
+      { key: 'kim',         name: 'KIM',          icon: 'mail' },
+      { key: 'ogd',         name: 'ÖGD',          icon: 'database' },
+      { key: 'tianschluss', name: 'TI‑Anschluss', icon: 'plug' },
+      { key: 'vsdm',        name: 'VSDM',         icon: 'activity' },
+      { key: 'wanda',       name: 'WANDA',        icon: 'wand' }
+    ];
+
+    // --- Helpers: map API status to CSS class and text ---
+    const statusClass = (s) =>
+      s === 'none'    ? 'status-none'   :
+      s === 'partial' ? 'status-partial':
+                        'status-total';
+
+    const statusText = (s) =>
+      s === 'none'    ? 'OK'            :
+      s === 'partial' ? 'Einschränkung' :
+      s === 'total'   ? 'Ausfall'       :
+      String(s ?? '');
+
+    // --- Render initial tiles ---
+    const container = document.getElementById('apps');
+    container.innerHTML = apps.map(app => `
+      <div class="app-box" data-app="${app.key}">
+        <span class="icon"><i data-lucide="${app.icon}" width="54" height="54" aria-hidden="true"></i></span>
+        <h4>${app.name}</h4>
+        <div class="status" data-status>—</div>
+      </div>
+    `).join('');
+    createIcons({ icons, attrs: { 'stroke-width': 1.75 } });
+
+    // ===== Notification permission handling =====
+    // Try requesting permission automatically on load and visibility changes.
+    // Browsers may ignore this without a user gesture → silent fail is acceptable.
+    let triedOnce = false;
+
+    async function tryRequestPermission() {
+      if (!('Notification' in window)) return;
+      if (Notification.permission === 'granted' || Notification.permission === 'denied') return;
+      if (triedOnce) return; // Avoid spamming
+      triedOnce = true;
+      try {
+        const perm = await Notification.requestPermission();
+        if (perm === 'granted') {
+          // Optional confirmation (may be suppressed by browser)
+          try { new Notification('TI‑Monitor', { body: 'Benachrichtigungen aktiviert.' }); } catch {}
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Request on load
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', tryRequestPermission, { once: true });
+    } else {
+      tryRequestPermission();
+    }
+
+    // Also attempt on focus and visibility change (close to user gesture)
+    window.addEventListener('focus', tryRequestPermission, { once: true });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') tryRequestPermission();
+    }, { once: true });
+
+    // ===== Persist previous status in localStorage =====
+    const LS_KEY = 'tiMonitor.status.v1';
+    function loadLast() { try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch { return {}; } }
+    function saveLast(map) { try { localStorage.setItem(LS_KEY, JSON.stringify(map)); } catch {} }
+    let lastMap = loadLast();
+
+    // Notify user if status worsens compared to previous state
+    function notifyIfDegraded(app, newOutage) {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+      const prev = lastMap[app.key];
+      const degraded =
+        (prev === 'none' && (newOutage === 'partial' || newOutage === 'total')) ||
+        (prev && prev !== 'Fehler' && newOutage === 'Fehler') ||
+        (prev === undefined && (newOutage === 'partial' || newOutage === 'total'));
+
+      if (!degraded) return;
+
+      const msg =
+        newOutage === 'partial' ? `${app.name}: Einschränkungen erkannt.` :
+        newOutage === 'total'   ? `${app.name}: Ausfall gemeldet.` :
+                                  `${app.name}: API-Fehler, Status unbekannt.`;
+
+      try {
+        new Notification('⚠️ TI‑Monitor', {
+          body: msg,
+          tag: `ti-${app.key}`, // Replace older notifications for same app
+          renotify: true,
+          requireInteraction: false
+        });
+      } catch {}
+    }
+
+    // --- Fetch and update statuses ---
+    async function updateTiStatuses() {
+      try {
+        const res = await fetch(API_TI, { cache: 'no-store' });
+        const data = await res.json();
+        const appStatus = data?.appStatus || {};
+
+        const newMap = { ...lastMap };
+        for (const app of apps) {
+          const box = container.querySelector(`.app-box[data-app="${app.key}"]`);
+          if (!box) continue;
+          const sEl = box.querySelector('[data-status]');
+
+          // Use API outage value or fallback to "total"
+          const outage = appStatus[app.key]?.outage ?? 'total';
+          sEl.className = `status ${statusClass(outage)}`;
+          sEl.textContent = statusText(outage);
+
+          notifyIfDegraded(app, outage);
+          newMap[app.key] = outage;
+        }
+        lastMap = newMap;
+        saveLast(newMap);
+      } catch (e) {
+        // On error: mark all as "Fehler" and notify
+        container.querySelectorAll('[data-status]').forEach(sEl => {
+          sEl.className = 'status status-total';
+          sEl.textContent = 'Fehler';
+        });
+        for (const app of apps) {
+          notifyIfDegraded(app, 'Fehler');
+          lastMap[app.key] = 'Fehler';
+        }
+        saveLast(lastMap);
+        console.error('TI-API Fehler:', e);
+      }
+    }
+
+    async function renderAll() {
+      await updateTiStatuses();
+    }
+
+    // Initial render + periodic refresh
+    renderAll();
+    setInterval(renderAll, REFRESH_MS);
+  </script>
+</body>
+</html>
